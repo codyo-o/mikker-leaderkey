@@ -54,6 +54,10 @@ class AppDelegate: NSObject, NSApplicationDelegate,
     state = UserState(userConfig: config)
     controller = Controller(userState: state, userConfig: config)
 
+    // Warm the command-runner's shell environment cache in the background so
+    // the first command action doesn't pay the capture latency (~200-500ms).
+    CommandRunner.warmCache()
+
     statusItem.handlePreferences = {
       self.showSettings()
     }

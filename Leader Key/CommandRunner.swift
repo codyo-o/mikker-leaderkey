@@ -2,9 +2,13 @@ import Cocoa
 
 class CommandRunner {
   /// Cached environment captured from the user's interactive shell.
-  /// Populated lazily on first `run()` so it doesn't slow app launch.
   /// `nil` means "not captured yet"; an empty dict means "capture failed, use inherited".
+  /// `warmCache()` populates this in the background at app launch so the first
+  /// command doesn't pay the capture latency.
   private static var cachedUserEnv: [String: String]?
+  /// In-flight background capture, if any. Lets the command-time path join an
+  /// already-running warm instead of starting a duplicate capture.
+  private static var pendingCapture: DispatchWorkItem?
   private static let cacheQueue = DispatchQueue(label: "CommandRunner.envCache")
 
   static func run(_ command: String) {
@@ -61,25 +65,59 @@ class CommandRunner {
   }
 
   /// Captures (once) the user's interactive zsh environment by running
-  /// `zsh -i -c 'env'` and parsing the output. Falls back to an empty dict
+  /// `zsh -i -l -c 'env'` and parsing the output. Falls back to an empty dict
   /// (so the caller uses the inherited environment) on failure or timeout.
+  ///
+  /// If `warmCache()` has kicked off a background capture, this waits for it
+  /// rather than starting a duplicate. Otherwise it captures synchronously.
   ///
   /// Note: this captures environment *variables* only — shell functions and
   /// aliases defined in `.zshrc` are not available to commands. For Leader Key's
   /// "command" actions (external binaries like `brew`, `node`, `git`, …) this is
   /// sufficient, since their availability is a function of PATH.
   private static func capturedUserShellEnvironment() -> [String: String] {
-    if let cached = cachedUserEnv { return cached }
+    // Fast path: cache hit.
+    let existing = cacheQueue.sync { cachedUserEnv }
+    if let existing { return existing }
 
+    // If a background warm is in flight, join it instead of re-capturing.
+    let pending = cacheQueue.sync { pendingCapture }
+    if let pending {
+      pending.wait()  // blocks until the warm completes; it's on a bg queue
+      let cached = cacheQueue.sync { cachedUserEnv }
+      if let cached { return cached }
+      // Warm finished but cache is still nil? Shouldn't happen; fall through.
+    }
+
+    // No warm in flight — capture synchronously now.
     var captured = captureUserShellEnvironmentBlocking()
     if captured == nil {
       // Capture failed (timeout, broken .zshrc, …). Cache an empty dict so we
       // don't retry the slow capture on every command.
       captured = [:]
     }
-
     cacheQueue.sync { cachedUserEnv = captured }
     return captured!
+  }
+
+  /// Fire-and-forget: kicks off the environment capture on a background queue so
+  /// it's ready before the first command runs. Call this at app launch. Safe to
+  /// call multiple times — only the first call actually starts a capture.
+  static func warmCache() {
+    // Don't start if we already have a cache or a capture is already running.
+    let shouldStart = cacheQueue.sync { cachedUserEnv == nil && pendingCapture == nil }
+    guard shouldStart else { return }
+
+    let work = DispatchWorkItem {
+      let captured = captureUserShellEnvironmentBlocking() ?? [:]
+      cacheQueue.sync {
+        cachedUserEnv = captured
+        pendingCapture = nil
+      }
+    }
+
+    cacheQueue.sync { pendingCapture = work }
+    DispatchQueue.global(qos: .utility).async(execute: work)
   }
 
   /// Runs the user's shell interactively once to dump its environment.
