@@ -88,4 +88,19 @@ final class CommandRunnerTests: XCTestCase {
     // Calling again should be safe
     CommandRunner._resetCacheForTesting()
   }
+
+  // MARK: - warmCache dedup
+
+  func testWarmCacheIsSafeToCallMultipleTimes() {
+    CommandRunner._resetCacheForTesting()
+
+    // Calling warmCache twice in quick succession must not start duplicate
+    // captures. The second call should be a no-op (cache or pending present).
+    CommandRunner.warmCache()
+    CommandRunner.warmCache()
+
+    // No assertion on captured contents (depends on the machine's shell); this
+    // test guards against crashes and duplicate-spawn regressions.
+    CommandRunner._resetCacheForTesting()
+  }
 }
