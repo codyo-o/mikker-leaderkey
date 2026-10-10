@@ -133,4 +133,9 @@ class CommandRunner {
     }
     return env
   }
+
+  /// Resets the cached environment. Used by tests.
+  static func _resetCacheForTesting() {
+    cacheQueue.sync { cachedUserEnv = nil }
+  }
 }
